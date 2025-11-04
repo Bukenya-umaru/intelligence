@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>A* Visualizer — f(n) = g(n) + h(n)</title>
+  <style>
+    :root{--cell:40px;--gap:4px}
+    body{font-family:Inter,Segoe UI,Roboto,Arial;margin:18px;background:#0f172a;color:#e6eef8}
+    h1{font-size:18px;margin:0 0 8px}
+    .wrap{display:flex;gap:18px}
+    .controls{width:320px}
+    .board{background:#071029;padding:12px;border-radius:8px;display:grid;grid-template-columns:repeat(5,auto)}
+    .grid{display:grid;gap:var(--gap);background:transparent;padding:12px;border-radius:8px}
+    .row{display:flex}
+    .cell{width:var(--cell);height:var(--cell);display:flex;align-items:center;justify-content:center;border-radius:6px;font-weight:600;cursor:pointer;user-select:none}
+    .cell.empty{background:#08263f}
+    .cell.wall{background:#26334a}
+    .cell.start{background:#0ea5a4}
+    .cell.goal{background:#f97316}
+    .cell.open{background:#184f8a}
+    .cell.closed{background:#1b2b52}
+    .cell.path{background:#65a30d}
+    .meta{font-size:13px;margin-top:6px;color:#cbd5e1}
+    button{background:#1f2937;color:#e6eef8;border:0;padding:8px 10px;border-radius:6px;margin:6px 6px 0 0;cursor:pointer}
+    button.primary{background:#2563eb}
+    label{display:block;margin:8px 0 4px;color:#cbd5e1}
+    .small{font-size:13px}
+    .row-controls{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+    .footer{margin-top:12px;color:#94a3b8;font-size:13px}
+    .info{margin-top:8px;background:#031127;padding:8px;border-radius:6px}
+    input[type=range]{width:100%}
+    .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .credits{font-size:12px;color:#94a3b8}
+  </style>
+</head>
+<body>
+  <h1>A* Visualizer — <small>f(n) = g(n) + h(n)</small></h1>
+  <div class="wrap">
+    <div class="controls">
+      <div class="topbar">
+        <div class="credits">Grid: 20×15 (editable)</div>
+        <div class="credits">Heuristic: Manhattan</div>
+      </div>
+
+      <div style="margin-top:10px">
+        <label>Grid size</label>
+        <div style="display:flex;gap:6px">
+          <input id="cols" type="number" min="5" max="60" value="20" style="width:72px;padding:6px;border-radius:6px;border:0;background:#0b2236;color:#dbeafe">
+          <input id="rows" type="number" min="5" max="40" value="15" style="width:72px;padding:6px;border-radius:6px;border:0;background:#0b2236;color:#dbeafe">
+          <button id="resize">Resize</button>
+        </div>
+      </div>
+
+      <label>Tools</label>
+      <div class="row-controls">
+        <button id="tool-wall" class="primary">Wall</button>
+        <button id="tool-start">Set Start</button>
+        <button id="tool-goal">Set Goal</button>
+        <button id="tool-erase">Erase</button>
+      </div>
+
+      <label>Control</label>
+      <div class="row-controls">
+        <button id="run">Run</button>
+        <button id="step">Step</button>
+        <button id="pause">Pause</button>
+        <button id="reset">Reset</button>
+        <button id="random">Randomize</button>
+      </div>
+
+      <label>Speed</label>
+      <input id="speed" type="range" min="10" max="1000" value="120">
+      <div class="meta small">Speed (ms per step): <span id="speedVal">120</span></div>
+
+      <div class="info">
+        <div><strong>g(n)</strong> = cost from start to node (steps)</div>
+        <div><strong>h(n)</strong> = Manhattan distance to goal</div>
+        <div><strong>f(n)</strong> = g + h, used to prioritize nodes</div>
+      </div>
+
+      <div class="footer">
+        Click cells to toggle. Use <em>Wall</em> tool to draw obstacles. Press <em>Run</em> to animate A*.
+      </div>
+    </div>
+
+    <div>
+      <div id="gridContainer" class="grid"></div>
+    </div>
+  </div>
+
+  <script>
+    // ======= Config & State =======
+    let cols = parseInt(document.getElementById('cols').value,10);
+    let rows = parseInt(document.getElementById('rows').value,10);
+    const gridContainer = document.getElementById('gridContainer');
+    const SPEED = document.getElementById('speed');
+    const speedVal = document.getElementById('speedVal');
+    let tool = 'wall';
+    let start = {x:2,y:2};
+    let goal = {x: cols-3, y: rows-3};
+    let cells = []; // 2D array {type, g, h, f, parent}
+    let timer = null; let running=false;
+
+    // ======= Helpers =======
+    function idx(x,y){return y*cols + x}
+    function inBounds(x,y){return x>=0 && y>=0 && x<cols && y<rows}
+    function manhattan(a,b){return Math.abs(a.x-b.x)+Math.abs(a.y-b.y)}
+
+    // ======= Grid rendering & init =======
+    function buildGrid(){
+      gridContainer.innerHTML='';
+      gridContainer.style.gridTemplateColumns = `repeat(${cols}, ${getComputedStyle(document.documentElement).getPropertyValue('--cell')})`;
+      gridContainer.style.gridTemplateRows = `repeat(${rows}, ${getComputedStyle(document.documentElement).getPropertyValue('--cell')})`;
+      cells = new Array(rows).fill(0).map(()=>new Array(cols).fill(0).map(()=>({type:'empty', g: Infinity, h:0, f: Infinity, parent:null})));
+
+      for(let y=0;y<rows;y++){
+        for(let x=0;x<cols;x++){
+          const el = document.createElement('div');
+          el.className = 'cell empty';
+          el.dataset.x = x; el.dataset.y = y;
+          el.addEventListener('pointerdown', onCellClick);
+          el.addEventListener('pointerenter', (e)=>{ if(e.buttons===1) onCellClick(e) });
+          gridContainer.appendChild(el);
+        }
+      }
+
+      // Ensure start/goal inside bounds
+      start = {x: Math.max(0, Math.min(cols-1, start.x)), y: Math.max(0, Math.min(rows-1, start.y))};
+      goal = {x: Math.max(0, Math.min(cols-1, goal.x)), y: Math.max(0, Math.min(rows-1, goal.y))};
+      setCell(start.x,start.y,'start');
+      setCell(goal.x,goal.y,'goal');
+      redraw();
+    }
+
+    function setCell(x,y,type){
+      if(!inBounds(x,y)) return;
+      if(type==='start'){
+        // clear previous start
+        for(let yy=0;yy<rows;yy++) for(let xx=0;xx<cols;xx++) if(cells[yy][xx].type==='start') cells[yy][xx].type='empty';
+        cells[y][x].type='start'; start={x,y};
+      } else if(type==='goal'){
+        for(let yy=0;yy<rows;yy++) for(let xx=0;xx<cols;xx++) if(cells[yy][xx].type==='goal') cells[yy][xx].type='empty';
+        cells[y][x].type='goal'; goal={x,y};
+      } else {
+        // prevent turning start/goal into wall by mistake
+        if(cells[y][x].type==='start' || cells[y][x].type==='goal') return;
+        cells[y][x].type = type;
+      }
+    }
+
+    function redraw(){
+      for(let y=0;y<rows;y++){
+        for(let x=0;x<cols;x++){
+          const el = gridContainer.children[idx(x,y)];
+          const t = cells[y][x].type;
+          el.className = 'cell ' + t;
+          el.title = '';
+          if(t==='open' || t==='closed' || t==='path'){
+            el.title = `g=${cells[y][x].g}\nh=${cells[y][x].h}\nf=${cells[y][x].f}`;
+          }
+        }
+      }
+    }
+
+    function onCellClick(e){
+      const x = parseInt(e.currentTarget.dataset.x,10);
+      const y = parseInt(e.currentTarget.dataset.y,10);
+      if(tool==='wall') setCell(x,y, cells[y][x].type==='wall' ? 'empty' : 'wall');
+      else if(tool==='start') setCell(x,y,'start');
+      else if(tool==='goal') setCell(x,y,'goal');
+      else if(tool==='erase') setCell(x,y,'empty');
+      redraw();
+    }
+
+    // ===== A* Implementation (step-friendly) =====
+    function neighbors(node){
+      const list = [];
+      const dirs = [{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+      for(const d of dirs){
+        const nx=node.x+d.x, ny=node.y+d.y;
+        if(inBounds(nx,ny) && cells[ny][nx].type!=='wall') list.push({x:nx,y:ny});
+      }
+      return list;
+    }
+
+    function aStarGenerator(){
+      // reset data
+      for(let y=0;y<rows;y++) for(let x=0;x<cols;x++){ cells[y][x].g = Infinity; cells[y][x].h = 0; cells[y][x].f = Infinity; cells[y][x].parent = null; if(cells[y][x].type==='open' || cells[y][x].type==='closed' || cells[y][x].type==='path') cells[y][x].type='empty'; }
+
+      const openList = [];
+      const startNode = {x:start.x,y:start.y};
+      cells[start.y][start.x].g = 0;
+      cells[start.y][start.x].h = manhattan(start, goal);
+      cells[start.y][start.x].f = cells[start.y][start.x].h;
+      openList.push(startNode);
+
+      while(openList.length>0){
+        // sort by f then by h as tiebreak
+        openList.sort((a,b)=> cells[a.y][a.x].f - cells[b.y][b.x].f || cells[a.y][a.x].h - cells[b.y][b.x].h);
+        const current = openList.shift();
+        const curCell = cells[current.y][current.x];
+
+        // mark closed (but keep start and goal)
+        if(!(current.x===start.x && current.y===start.y) && !(current.x===goal.x && current.y===goal.y)) curCell.type='closed';
+
+        // Goal reached => reconstruct path and finish
+        if(current.x===goal.x && current.y===goal.y){
+          // build path
+          let p = current; while(p){ if(!(p.x===start.x && p.y===start.y) && !(p.x===goal.x && p.y===goal.y)) cells[p.y][p.x].type='path'; p = cells[p.y][p.x].parent; }
+          redraw();
+          return {done:true, pathFound:true};
+        }
+
+        const neighs = neighbors(current);
+        for(const n of neighs){
+          const tentativeG = curCell.g + 1; // uniform cost
+          if(tentativeG < cells[n.y][n.x].g){
+            cells[n.y][n.x].parent = current;
+            cells[n.y][n.x].g = tentativeG;
+            cells[n.y][n.x].h = manhattan(n, goal);
+            cells[n.y][n.x].f = cells[n.y][n.x].g + cells[n.y][n.x].h; // f = g + h
+
+            // add to open if not present
+            if(!openList.find(o=>o.x===n.x && o.y===n.y)){
+              openList.push({x:n.x,y:n.y});
+              if(!(n.x===start.x && n.y===start.y) && !(n.x===goal.x && n.y===goal.y)) cells[n.y][n.x].type='open';
+            }
+          }
+        }
+
+        redraw();
+        // yield control to caller to allow animation
+        return {done:false, openList:openList.slice(), current};
+      }
+
+      // no path
+      redraw();
+      return {done:true, pathFound:false};
+    }
+
+    // We'll wrap the generator logic into an iterator-like process
+    let astarState = null;
+    function startAStar(){
+      astarState = {running:true};
+      stepAStar();
+    }
+
+    function stepAStar(){
+      const res = aStarGenerator();
+      if(res.done){
+        running = false; clearInterval(timer); timer=null;
+        if(res.pathFound) alert('Path found!'); else alert('No path available');
+        return;
+      }
+    }
+
+    function runAStar(){
+      if(running) return;
+      running = true;
+      timer = setInterval(()=>{
+        const res = aStarGenerator();
+        if(res.done){ running=false; clearInterval(timer); timer=null; if(res.pathFound) alert('Path found!'); else alert('No path available'); }
+      }, parseInt(SPEED.value,10));
+    }
+
+    function pauseAStar(){ if(timer){ clearInterval(timer); timer=null; running=false; } }
+
+    // ====== UI wiring ======
+    document.getElementById('tool-wall').addEventListener('click', ()=>{ tool='wall'; toggleActive('tool-wall') });
+    document.getElementById('tool-start').addEventListener('click', ()=>{ tool='start'; toggleActive('tool-start') });
+    document.getElementById('tool-goal').addEventListener('click', ()=>{ tool='goal'; toggleActive('tool-goal') });
+    document.getElementById('tool-erase').addEventListener('click', ()=>{ tool='erase'; toggleActive('tool-erase') });
+
+    document.getElementById('run').addEventListener('click', ()=>{ runAStar(); });
+    document.getElementById('step').addEventListener('click', ()=>{ stepAStar(); });
+    document.getElementById('pause').addEventListener('click', ()=>{ pauseAStar(); });
+    document.getElementById('reset').addEventListener('click', ()=>{ pauseAStar(); buildGrid(); });
+    document.getElementById('random').addEventListener('click', ()=>{ randomizeWalls(); });
+    document.getElementById('resize').addEventListener('click', ()=>{ cols = parseInt(document.getElementById('cols').value,10); rows = parseInt(document.getElementById('rows').value,10); pauseAStar(); buildGrid(); });
+
+    SPEED.addEventListener('input', ()=>{ speedVal.textContent = SPEED.value; });
+
+    function toggleActive(id){ document.querySelectorAll('.controls button').forEach(b=>b.classList.remove('active')); document.getElementById(id).classList.add('active'); }
+
+    function randomizeWalls(){
+      pauseAStar();
+      for(let y=0;y<rows;y++) for(let x=0;x<cols;x++){ if(Math.random()<0.25) cells[y][x].type='wall'; else cells[y][x].type='empty'; }
+      // ensure start/goal
+      setCell(start.x,start.y,'start'); setCell(goal.x,goal.y,'goal'); redraw();
+    }
+
+    // initial
+    buildGrid(); toggleActive('tool-wall');
+  </script>
+</body>
+</html>
